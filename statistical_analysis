@@ -1,0 +1,497 @@
+setwd("C:/Users/Alejandra/Desktop/UTK SOIL PLANT & ENVIRNMTL SCIENCES/SPRING 2026/STATISTICS/Projects/dna-persistence")
+
+library(tidyverse)
+library(lme4)
+library(nlstools)   # for nonlinear least squares + confidence intervals
+library(AICcmodavg) # for AIC/BIC model comparison
+library(car)
+
+# =============================================================================
+# Step 1 - ANOVA — separate per source (destructive sampling design)
+# Concentration effect within each source at Day 7 and Day 180
+# =============================================================================
+
+data <- read.csv("synplastomic_edna_simulated.csv")
+
+# Make sure factors are ordered correctly
+data$source        <- factor(data$source,
+                             levels = c("plasmid", "ground_tissue", "leaves"))
+data$concentration <- factor(data$concentration, levels = c(500, 1000, 2000))
+
+# Step 1 — One crossed ANOVA to test the interaction
+# Day 7: tests whether source/concentration affect initial decay rate
+day7 <- data[data$time_days == 7, ]
+aov_day7 <- aov(fraction_remaining ~ source * concentration, data = day7)
+
+# Day 180: tests whether source/concentration affect stabilization (s)
+day180 <- data[data$time_days == 180, ]
+aov_day180 <- aov(fraction_remaining ~ source * concentration, data = day180)
+
+# =============================================================================
+# ANOVA ASSUMPTION CHECKS 
+# =============================================================================
+
+# Day 7
+shapiro.test(residuals(aov_day7))
+leveneTest(fraction_remaining ~ source * concentration, data = day7)
+par(mfrow = c(2, 2))
+plot(aov_day7)
+par(mfrow = c(1, 1))
+
+# Day 180
+shapiro.test(residuals(aov_day180))
+leveneTest(fraction_remaining ~ source * concentration, data = day180)
+par(mfrow = c(2, 2))
+plot(aov_day180)
+par(mfrow = c(1, 1))
+
+# =============================================================================
+# *** ANOVA RESULTS ***
+# =============================================================================
+
+summary(aov_day7)
+TukeyHSD(aov_day7)  # post-hoc: which groups differ?
+
+summary(aov_day180)
+TukeyHSD(aov_day180)
+
+# =============================================================================
+# Step 2 — ANOVA per independent source
+# =============================================================================
+
+#### Plasmid 
+# Day 7: tests whether source/concentration affect initial decay rate
+day7_plasmid   <- data[data$source == "plasmid" & data$time_days ==   7, ]
+aov_day7_plasmid   <- aov(fraction_remaining ~ concentration, data = day7_plasmid)
+
+# Day 180: tests whether source/concentration affect stabilization (s)
+day180_plasmid <- data[data$source == "plasmid" & data$time_days == 180, ]
+aov_day180_plasmid <- aov(fraction_remaining ~ concentration, data = day180_plasmid)
+
+# Assumption checks
+shapiro.test(residuals(aov_day7_plasmid))
+shapiro.test(residuals(aov_day180_plasmid))
+
+# Results
+summary(aov_day7_plasmid)
+TukeyHSD(aov_day7_plasmid)
+
+summary(aov_day180_plasmid)
+TukeyHSD(aov_day180_plasmid)
+
+### Ground tissue
+# Day 7: tests whether source/concentration affect initial decay rate
+day7_ground   <- data[data$source == "ground_tissue" & data$time_days ==   7, ]
+aov_day7_ground   <- aov(fraction_remaining ~ concentration, data = day7_ground)
+
+# Day 180: tests whether source/concentration affect stabilization (s)
+day180_ground <- data[data$source == "ground_tissue" & data$time_days == 180, ]
+aov_day180_ground <- aov(fraction_remaining ~ concentration, data = day180_ground)
+
+# Assumption checks
+shapiro.test(residuals(aov_day7_ground))
+shapiro.test(residuals(aov_day180_ground))
+
+# Results
+summary(aov_day7_ground)
+TukeyHSD(aov_day7_ground)
+
+summary(aov_day180_ground)
+TukeyHSD(aov_day180_ground)
+
+#### Leaves
+# Day 7: tests whether source/concentration affect initial decay rate
+day7_leaves   <- data[data$source == "leaves" & data$time_days ==   7, ]
+aov_day7_leaves   <- aov(fraction_remaining ~ concentration, data = day7_leaves)
+
+# Day 180: tests whether source/concentration affect stabilization (s)
+day180_leaves <- data[data$source == "leaves" & data$time_days == 180, ]
+aov_day180_leaves <- aov(fraction_remaining ~ concentration, data = day180_leaves)
+
+# Assumption checks
+shapiro.test(residuals(aov_day7_leaves))
+shapiro.test(residuals(aov_day180_leaves))
+
+# Results
+summary(aov_day7_leaves)
+TukeyHSD(aov_day7_leaves)
+
+summary(aov_day180_leaves)
+TukeyHSD(aov_day180_leaves)
+
+# =============================================================================
+# Step 3 — Fully factorial decay model
+# Single unified NLS on all 189 rows
+# Model equation from Sirois & Buckley (2018):
+# fraction_remaining = s + (1 - s) * exp(-time_days * exp(d))
+# =============================================================================
+
+# Step 0 — prepare factors
+data$source        <- factor(data$source,
+                             levels = c("plasmid", "ground_tissue", "leaves"))
+data$concentration <- factor(data$concentration,
+                             levels = c(500, 1000, 2000))
+data$group         <- interaction(data$source, data$concentration, sep = "_")
+groups             <- levels(data$group)
+
+# -----------------------------------------------------------------------------
+# Null model — one d and s for ALL 189 rows
+# -----------------------------------------------------------------------------
+
+model_null <- nls(
+  fraction_remaining ~ s + (1 - s) * exp(-time_days * exp(d)),
+  data    = data,
+  start   = list(d = 0.1, s = 0.001),
+  control = nls.control(maxiter = 500)
+)
+summary(model_null)
+
+# -----------------------------------------------------------------------------
+# Model A — d and s vary by source x concentration (9 groups)
+# Each group gets its own d and s — 18 parameters total
+# -----------------------------------------------------------------------------
+
+# Build formula dynamically
+d_terms   <- paste0("d_", groups, " * (group == '", groups, "')",
+                    collapse = " + ")
+s_terms   <- paste0("s_", groups, " * (group == '", groups, "')",
+                    collapse = " + ")
+
+formula_A <- as.formula(paste0(
+  "fraction_remaining ~ (", s_terms, ") + ",
+  "(1 - (", s_terms, ")) * ",
+  "exp(-time_days * exp(", d_terms, "))"
+))
+
+start_A <- c(
+  setNames(rep(0.1,   length(groups)), paste0("d_", groups)),
+  setNames(rep(0.001, length(groups)), paste0("s_", groups))
+)
+
+model_A <- nls(
+  formula_A,
+  data    = data,
+  start   = start_A,
+  control = nls.control(maxiter = 500)
+)
+summary(model_A)
+
+# -----------------------------------------------------------------------------
+# Model B — d shared globally, s varies by group
+# 1 shared d + 9 group-specific s values — 10 parameters total
+# -----------------------------------------------------------------------------
+
+d_shared_global <- coef(model_null)["d"]
+
+formula_B <- as.formula(paste0(
+  "fraction_remaining ~ (", s_terms, ") + ",
+  "(1 - (", s_terms, ")) * ",
+  "exp(-time_days * exp(d_shared))"
+))
+
+start_B <- c(
+  d_shared = as.numeric(d_shared_global),
+  setNames(rep(0.001, length(groups)), paste0("s_", groups))
+)
+
+model_B <- nls(
+  formula_B,
+  data    = data,
+  start   = start_B,
+  control = nls.control(maxiter = 500)
+)
+summary(model_B)
+
+# -----------------------------------------------------------------------------
+# NLS ASSUMPTION CHECKS
+# -----------------------------------------------------------------------------
+
+# 1. Residuals vs Fitted
+plot(fitted(model_A), residuals(model_A),
+     xlab = "Fitted values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted — Model A")
+abline(h = 0, lty = "dashed", col = "red")
+
+# 2. Normality of residuals
+shapiro.test(residuals(model_A))
+
+# 3. Q-Q plot
+qqnorm(residuals(model_A), main = "Normal Q-Q Plot — Model A residuals")
+qqline(residuals(model_A), col = "red")
+
+# 4. Scale-Location
+plot(fitted(model_A), sqrt(abs(residuals(model_A))),
+     xlab = "Fitted values",
+     ylab = "sqrt(|Residuals|)",
+     main = "Scale-Location — Model A")
+
+# 5. Residuals by group
+data$residuals_A <- residuals(model_A)
+ggplot(data, aes(x = group, y = residuals_A, color = source)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Residuals by group — Model A",
+       x     = "Group", y = "Residuals") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 6. Residuals over time
+ggplot(data, aes(x = time_days, y = residuals_A, color = source)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_smooth(se = FALSE, linewidth = 0.8) +
+  labs(title = "Residuals over time — Model A",
+       x     = "Time (days)", y = "Residuals") +
+  theme_bw()
+
+# 7. Autocorrelation check
+acf(residuals(model_A), main = "ACF of Model A residuals")
+
+
+# -----------------------------------------------------------------------------
+# Step 4 — Model selection by AIC and BIC
+# NOW valid — all three models fit on same 189 rows
+# -----------------------------------------------------------------------------
+
+AIC(model_null, model_B, model_A)
+BIC(model_null, model_B, model_A)
+
+# -----------------------------------------------------------------------------
+# Extract parameters from winning model (Model A)
+# -----------------------------------------------------------------------------
+
+coef_A    <- coef(model_A)
+results_A <- data.frame(
+  group         = groups,
+  source        = gsub("_[0-9]+$", "", groups),
+  concentration = gsub(".*_([0-9]+)$", "\\1", groups),
+  d             = coef_A[paste0("d_", groups)],
+  s             = coef_A[paste0("s_", groups)]
+)
+results_A
+
+# =============================================================================
+# Figures — # Global Model A 
+# =============================================================================
+
+library(tidyverse)
+
+# -----------------------------------------------------------------------------
+# Theme
+# -----------------------------------------------------------------------------
+
+paper_theme <- theme_bw() +
+  theme(
+    panel.grid.minor  = element_blank(),
+    axis.text         = element_text(size = 10),
+    axis.title        = element_text(size = 11),
+    legend.text       = element_text(size = 10),
+    legend.title      = element_text(size = 10),
+    legend.position   = "right",
+    strip.text        = element_text(size = 10, face = "bold"),
+    strip.background  = element_rect(fill = "gray95", color = "gray70"),
+    plot.caption      = element_text(size = 8, hjust = 0, color = "gray40")
+  )
+
+conc_colors <- c("500"  = "#4f8fd4",
+                 "1000" = "#D40F92",
+                 "2000" = "#4caa72")
+conc_shapes <- c("500" = 0, "1000" = 1, "2000" = 2)
+conc_labels <- c("500"  = "500 ng/g",
+                 "1000" = "1000 ng/g",
+                 "2000" = "2000 ng/g")
+
+# -----------------------------------------------------------------------------
+# Function: observed summaries
+# Uncertainty computed directly in log10 space from raw observations
+# This is the only fully coherent approach for log-scale plots
+# NA returned for n=1 (undefined variance, not zero variance)
+# -----------------------------------------------------------------------------
+
+get_summary <- function(src) {
+  data %>%
+    filter(source == src) %>%
+    group_by(concentration, time_days) %>%
+    summarise(
+      n        = n(),
+      mean_log = mean(log10(fraction_remaining), na.rm = TRUE),
+      sd_log   = ifelse(n() > 1,
+                        sd(log10(fraction_remaining), na.rm = TRUE),
+                        NA_real_),
+      .groups  = "drop"
+    ) %>%
+    mutate(
+      concentration = factor(as.character(concentration),
+                             levels = c("500", "1000", "2000")),
+      mean_frac     = 10^mean_log,
+      frac_lo       = ifelse(!is.na(sd_log),
+                             10^(mean_log - sd_log), NA_real_),
+      frac_hi       = ifelse(!is.na(sd_log),
+                             10^(mean_log + sd_log), NA_real_)
+    )
+}
+
+# -----------------------------------------------------------------------------
+# Function: fitted curves from global Model A
+# Model integrity checks before computation
+# Multiscale time sequence for early decay resolution
+# d is log-rate: exp(d) is the actual rate multiplier (always positive)
+# -----------------------------------------------------------------------------
+
+get_curves <- function(src) {
+  
+  stopifnot(all(c("source", "concentration", "s", "d") %in% names(results_A)))
+  
+  bind_rows(lapply(c("500", "1000", "2000"), function(conc) {
+    
+    row <- dplyr::filter(results_A,
+                         source        == src,
+                         concentration == conc)
+    
+    # Model integrity checks
+    stopifnot(nrow(row) == 1)
+    stopifnot(is.numeric(row$d) && !is.na(row$d))
+    stopifnot(is.numeric(row$s) && !is.na(row$s))
+    stopifnot(row$s >= -0.01 && row$s <= 1)    # s should be valid fraction
+    stopifnot(exp(row$d) > 0 && exp(row$d) < 100) # exp(d) must be stable
+    
+    # Multiscale time sequence — better resolution for early decay
+    t_seq <- sort(unique(c(
+      seq(0,   7,   by = 0.1),
+      seq(7,   28,  by = 0.5),
+      seq(28,  180, by = 1)
+    )))
+    
+    tibble(
+      concentration = conc,
+      time_days     = t_seq,
+      fitted        = row$s + (1 - row$s) * exp(-t_seq * exp(row$d))
+    )
+  })) %>%
+    mutate(concentration = factor(concentration,
+                                  levels = c("500", "1000", "2000")))
+}
+
+# -----------------------------------------------------------------------------
+# Function: build one figure
+# Faceted by concentration — no position_dodge on continuous time
+# Error bars show SD in log10 space — explicitly stated in caption
+# NA error bars omitted naturally by ggplot
+# -----------------------------------------------------------------------------
+
+make_fig <- function(curves_df, summary_df, title_text) {
+  
+  ggplot() +
+    
+    # Fitted decay curves from global Model A
+    geom_line(data = curves_df,
+              aes(x     = time_days,
+                  y     = fitted,
+                  color = concentration),
+              linewidth = 1.2) +
+    
+    # SD bands — early time points only
+    geom_errorbar(data  = summary_df %>% filter(time_days <= 28),
+                  aes(x     = time_days,
+                      ymin  = frac_lo,
+                      ymax  = frac_hi,
+                      color = concentration),
+                  width = 0.8,
+                  na.rm = TRUE) +
+    
+    # Observed geometric means
+    geom_point(data  = summary_df,
+               aes(x     = time_days,
+                   y     = mean_frac,
+                   shape = concentration,
+                   color = concentration),
+               size   = 3,
+               stroke = 1.3) +
+    
+    # Legends now needed — no facet strips to label concentration
+    scale_color_manual(values = conc_colors, labels = conc_labels) +
+    scale_shape_manual(values = conc_shapes, labels = conc_labels) +
+    
+    scale_x_continuous(
+      limits = c(0, 185),
+      breaks = c(0, 1, 7, 14, 28, 90, 180)
+    ) +
+    
+    scale_y_log10(
+      limits = c(1e-4, 2),
+      breaks = c(1e-3, 1e-2, 1e-1, 1e0),
+      labels = scales::trans_format("log10", scales::math_format(10^.x))
+    ) +
+    
+    labs(x       = "Time elapsed (days)",
+         y       = "eDNA standard (fraction remaining)",
+         color   = "Concentration",
+         shape   = "Concentration",
+         title   = title_text,
+         caption = paste(
+           "Curves: best-fit exponential decay model (Global Model A,",
+           "Sirois & Buckley 2018).",
+           "\nPoints: geometric means of observed fraction remaining (n=3).",
+           "\nError bars: \u00b11 SD of log\u2081\u2080-transformed observations",
+           "(variability, not confidence intervals).",
+           "\nLoD for qPCR is below the plotted range and is not shown."
+         )) +
+    
+    paper_theme
+}
+
+# -----------------------------------------------------------------------------
+# Prepare results_A — ensure character types for subsetting
+# -----------------------------------------------------------------------------
+
+results_A <- results_A %>%
+  mutate(source        = as.character(source),
+         concentration = as.character(concentration))
+
+# -----------------------------------------------------------------------------
+# Build curves and summaries for all sources
+# -----------------------------------------------------------------------------
+
+sources <- c("plasmid", "ground_tissue", "leaves")
+
+curves    <- setNames(lapply(sources, get_curves),  sources)
+summaries <- setNames(lapply(sources, get_summary), sources)
+
+# -----------------------------------------------------------------------------
+# Source-specific titles
+# -----------------------------------------------------------------------------
+
+source_titles <- c(
+  plasmid       = "Plasmid DNA — effect of concentration on eDNA decay\nand stabilization (Global Model A)",
+  ground_tissue = "Ground tissue DNA — effect of concentration on eDNA decay\nand stabilization (Global Model A)",
+  leaves        = "Leaf DNA — effect of concentration on eDNA decay\nand stabilization (Global Model A)"
+)
+
+# -----------------------------------------------------------------------------
+# Generate figures
+# -----------------------------------------------------------------------------
+
+figs <- setNames(lapply(sources, function(src) {
+  make_fig(
+    curves_df  = curves[[src]],
+    summary_df = summaries[[src]],
+    title_text = source_titles[src]
+  )
+}), sources)
+
+figs[["plasmid"]]
+figs[["ground_tissue"]]
+figs[["leaves"]]
+
+# -----------------------------------------------------------------------------
+# Save
+# -----------------------------------------------------------------------------
+
+# Save with standard dimensions (not tall)
+ggsave("fig1_plasmid.png",
+       figs[["plasmid"]],       width = 7, height = 5, dpi = 300)
+ggsave("fig2_ground_tissue.png",
+       figs[["ground_tissue"]], width = 7, height = 5, dpi = 300)
+ggsave("fig3_leaves.png",
+       figs[["leaves"]],        width = 7, height = 5, dpi = 300)

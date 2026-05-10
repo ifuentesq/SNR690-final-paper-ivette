@@ -1,0 +1,109 @@
+library(tidyverse)
+library(lme4)
+
+set.seed(123)
+
+# =============================================================================
+### Simulation of synplastomic DNA persistence in soil microcosms
+# Based on Sirois & Buckley (2018)
+#
+# Design:
+#   Source:        3 levels (plasmid, ground_tissue, leaves)
+#   Concentration: 3 levels (500, 1000, 2000 ng/g soil)
+#   Time points:   7 levels (0, 1, 7, 14, 28, 90, 180 days)
+#   Replicates:    3 per time point
+#   Total rows:    189
+# =============================================================================
+
+# Factors
+time_points  <- c(0, 1, 7, 14, 28, 90, 180)
+replicates   <- c(1, 2, 3)
+lod          <- 2e5    # Limit of detection: 2e5 copies/g soil
+cv           <- 0.10   # Coefficient of variation: 10% variability between replicates
+
+# -----------------------------------------------------------------------------
+# Parameter table — one row per Source x Concentration group (9 groups total)
+# Each group = 3 replicates x 7 time points = 21 rows
+#
+# Key biological decisions:
+#   - All sources lose >99% by Day 7 (consistent with the paper)
+#   - Sources differ mainly in s (stabilization), not d (decay rate)
+#   - Plasmid:       lowest s (no physical protection)
+#   - Ground tissue: intermediate s
+#   - Leaves:        highest s (intact cellular matrix protects DNA)
+#   - Higher concentration = slightly faster decay (minor effect on d)
+#   - I0 scaled to doses: 500 ng → ~5e11, 1000 ng → ~1e12, 2000 ng → ~2e12
+# -----------------------------------------------------------------------------
+
+groups <- data.frame(
+  source        = c("plasmid",  "plasmid",  "plasmid",
+                    "ground_tissue", "ground_tissue", "ground_tissue",
+                    "leaves",   "leaves",   "leaves"),
+  concentration = c(500,       1000,      2000,
+                    500,       1000,      2000,
+                    500,       1000,      2000),
+  d             = c(log(1.20), log(1.25), log(1.30),  # plasmid: fastest d
+                    log(1.00), log(1.05), log(1.10),  # ground_tissue: mid d
+                    log(0.85), log(0.90), log(0.95)), # leaves: slowest d
+  s             = c(0.0008,   0.0010,   0.0012,    # plasmid: lowest s
+                    0.0018,   0.0022,   0.0025,    # ground_tissue: mid s
+                    0.0032,   0.0038,   0.0044),   # leaves: highest s
+  i0            = c(5.2e11,   1.05e12,  2.10e12,   # plasmid I0 per conc
+                    4.8e11,   9.50e11,  1.90e12,   # ground_tissue I0
+                    4.2e11,   8.50e11,  1.70e12)   # leaves I0
+)
+
+# -----------------------------------------------------------------------------
+# Expand each group across all time points and replicates
+# then generate observed copies/g using Sirois & Buckley (2018) decay model:
+#   fraction remaining = s + (1 - s) * exp(-t * exp(d))
+# -----------------------------------------------------------------------------
+
+design <- merge(groups, expand.grid(time_days = time_points, replicate = replicates))
+
+design$copies_per_g <- mapply(function(d, s, i0, t) {
+  
+  frac      <- s + (1 - s) * exp(-t * exp(d))
+  sigma_log <- sqrt(log(1 + cv^2))
+  noise     <- rlnorm(1, meanlog = 0, sdlog = sigma_log)
+  y         <- i0 * frac * noise
+  ifelse(y >= lod, round(y, 0), lod)
+  
+}, d = design$d, s = design$s, i0 = design$i0, t = design$time_days)
+
+design$below_lod <- design$copies_per_g == lod
+
+# Calculate fraction remaining (I0 = mean of Day 0 reps per group)
+i0_obs <- aggregate(copies_per_g ~ source + concentration,
+                    data = design[design$time_days == 0, ], FUN = mean)
+names(i0_obs)[3] <- "i0_obs"
+design <- merge(design, i0_obs, by = c("source", "concentration"))
+design$fraction_remaining <- design$copies_per_g / design$i0_obs
+design$log10_fraction     <- log10(design$fraction_remaining)
+
+# Factor levels and sort
+design$source        <- factor(design$source,
+                               levels = c("plasmid", "ground_tissue", "leaves"))
+design$concentration <- factor(design$concentration, levels = c(500, 1000, 2000))
+design               <- design[order(design$source, design$concentration,
+                                     design$time_days, design$replicate), ]
+rownames(design)     <- NULL
+
+# Keep only output columns (drop d, s, i0 used internally)
+final_data <- design[, c("source", "concentration", "time_days", "replicate",
+                         "copies_per_g", "below_lod",
+                         "fraction_remaining", "log10_fraction")]
+
+# Sanity checks
+nrow(final_data)   # expected: 189
+
+# Day 7 fraction — should be <0.01 for all groups
+aggregate(fraction_remaining ~ source + concentration,
+          data = final_data[final_data$time_days == 7, ], FUN = mean)
+
+# Day 180 fraction — stabilization asymptote
+aggregate(fraction_remaining ~ source + concentration,
+          data = final_data[final_data$time_days == 180, ], FUN = mean)
+
+# Export
+write.csv(final_data, "synplastomic_edna_simulated.csv", row.names = FALSE)
